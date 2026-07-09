@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>UAV PA-MPPI Professional 3D Viewer</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #ffffff; color: black; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #slider-container { position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); width: 80%; background: rgba(255,255,255,0.85); padding: 20px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); text-align: center; }
+        input[type=range] { width: 100%; cursor: pointer; }
+        #info { position: absolute; top: 20px; left: 20px; background: rgba(255,255,255,0.85); padding: 15px 25px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); border-left: 5px solid #0077ff; }
+        h3 { margin-top: 0; color: #0077ff; }
+        .stats { font-size: 14px; color: #555; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="flight_data.js"></script>
+</head>
+<body>
+    <div id="info">
+        <h3>PA-MPPI Telemetry</h3>
+        <p>Simulation Step: <strong id="step-label" style="color:#0077ff; font-size: 18px;">0</strong></p>
+        <p class="stats">Scroll to Zoom | Drag to Rotate</p>
+    </div>
+    <div id="slider-container">
+        <input type="range" id="frame-slider" min="0" max="100" value="0" step="1">
+    </div>
+    <script>
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0xffffff, 0.015);
+        
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        THREE.Object3D.DefaultUp.set(0, 0, 1);
+        camera.up.set(0, 0, 1);
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setClearColor(0xffffff);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        
+        const light = new THREE.DirectionalLight(0xffffff, 1);
+        light.position.set(10, -10, 20);
+        scene.add(light);
+        scene.add(new THREE.AmbientLight(0x606060));
+
+        scene.add(new THREE.AxesHelper(3));
+        const gridHelper = new THREE.GridHelper(100, 100, 0xaaaaaa, 0xdddddd);
+        gridHelper.rotation.x = Math.PI / 2;
+        scene.add(gridHelper);
+
+        const treeMat = new THREE.MeshLambertMaterial({ color: 0xff4400, transparent: true, opacity: 0.7 });
+        const sphereTreeMat = new THREE.MeshLambertMaterial({ color: 0x00aaff, transparent: true, opacity: 0.7 });
+        const pathMat = new THREE.LineBasicMaterial({ color: 0x4444ff, linewidth: 2, transparent: true, opacity: 0.4 });
+        
+        const dynamicGroup = new THREE.Group();
+        scene.add(dynamicGroup);
+
+        const pointsMat = new THREE.PointsMaterial({ color: 0x00ff88, size: 0.15 });
+
+        function buildStatic() {
+            FLIGHT_DATA.static.trees.forEach(t => {
+                let mesh;
+                if (t.type === 'sphere') {
+                    const geo = new THREE.SphereGeometry(t.radius, 16, 16);
+                    mesh = new THREE.Mesh(geo, sphereTreeMat);
+                    mesh.position.set(t.x, t.y, t.z);
+                } else {
+                    const geo = new THREE.CylinderGeometry(t.radius, t.radius, t.height, 16);
+                    mesh = new THREE.Mesh(geo, treeMat);
+                    mesh.rotation.x = Math.PI / 2;
+                    mesh.position.set(t.x, t.y, t.height / 2);
+                }
+                scene.add(mesh);
+            });
+
+            const goalGeo = new THREE.SphereGeometry(0.3, 16, 16);
+            const goalMat = new THREE.MeshLambertMaterial({ color: 0xff0000 });
+            const goalMesh = new THREE.Mesh(goalGeo, goalMat);
+            goalMesh.position.set(FLIGHT_DATA.static.goal[0], FLIGHT_DATA.static.goal[1], FLIGHT_DATA.static.goal[2]);
+            scene.add(goalMesh);
+
+            const pts = FLIGHT_DATA.static.path.map(p => new THREE.Vector3(p[0], p[1], p[2]));
+            if (pts.length > 0) {
+                const geo = new THREE.BufferGeometry().setFromPoints(pts);
+                scene.add(new THREE.Line(geo, pathMat));
+                
+                const center = pts[Math.floor(pts.length / 2)];
+                controls.target.set(center.x, center.y, center.z);
+                camera.position.set(center.x + 10, center.y - 15, center.z + 10);
+            }
+        }
+
+        const droneMat = new THREE.MeshLambertMaterial({ color: 0xffcc00 });
+        const bestPathMat = new THREE.LineBasicMaterial({ color: 0xff0000, linewidth: 3 });
+        const candPathMat = new THREE.LineBasicMaterial({ color: 0xaa00ff, transparent: true, opacity: 0.15 });
+
+        function buildFrame(idx) {
+            while(dynamicGroup.children.length > 0){ 
+                dynamicGroup.remove(dynamicGroup.children[0]); 
+            }
+            
+            if (FLIGHT_DATA.frames.length === 0) return;
+            const frame = FLIGHT_DATA.frames[idx];
+            document.getElementById('step-label').innerText = frame.frame_idx;
+
+            const dGeo = new THREE.SphereGeometry(0.15, 16, 16);
+            const dMesh = new THREE.Mesh(dGeo, droneMat);
+            dMesh.position.set(frame.p_w[0], frame.p_w[1], frame.p_w[2]);
+            dynamicGroup.add(dMesh);
+
+            if (frame.known_points.length > 0) {
+                const pGeo = new THREE.BufferGeometry();
+                const positions = new Float32Array(frame.known_points.length * 3);
+                for(let i=0; i<frame.known_points.length; i++) {
+                    positions[i*3] = frame.known_points[i][0];
+                    positions[i*3+1] = frame.known_points[i][1];
+                    positions[i*3+2] = frame.known_points[i][2];
+                }
+                pGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                dynamicGroup.add(new THREE.Points(pGeo, pointsMat));
+            }
+
+            if (frame.best_path.length > 0) {
+                const bPts = frame.best_path.map(p => new THREE.Vector3(p[0], p[1], p[2]));
+                const bGeo = new THREE.BufferGeometry().setFromPoints(bPts);
+                dynamicGroup.add(new THREE.Line(bGeo, bestPathMat));
+            }
+
+            frame.candidate_paths.forEach(cand => {
+                if (cand.length > 0) {
+                    const cPts = cand.map(p => new THREE.Vector3(p[0], p[1], p[2]));
+                    const cGeo = new THREE.BufferGeometry().setFromPoints(cPts);
+                    dynamicGroup.add(new THREE.Line(cGeo, candPathMat));
+                }
+            });
+            
+            // Draw Camera Frustum
+            const D = 2.0;
+            const W = D * Math.tan(34.5 * Math.PI / 180.0);
+            const yaw = frame.yaw || 0.0;
+            const cosY = Math.cos(yaw);
+            const sinY = Math.sin(yaw);
+            
+            const fwd = new THREE.Vector3(-sinY, cosY, 0);
+            const right = new THREE.Vector3(cosY, sinY, 0);
+            const up = new THREE.Vector3(0, 0, 1);
+            
+            const p0 = new THREE.Vector3(frame.p_w[0], frame.p_w[1], frame.p_w[2]);
+            const corners = [
+                new THREE.Vector3().copy(p0).add(fwd.clone().multiplyScalar(D)).add(right.clone().multiplyScalar(W)).add(up.clone().multiplyScalar(W)),
+                new THREE.Vector3().copy(p0).add(fwd.clone().multiplyScalar(D)).add(right.clone().multiplyScalar(W)).add(up.clone().multiplyScalar(-W)),
+                new THREE.Vector3().copy(p0).add(fwd.clone().multiplyScalar(D)).add(right.clone().multiplyScalar(-W)).add(up.clone().multiplyScalar(-W)),
+                new THREE.Vector3().copy(p0).add(fwd.clone().multiplyScalar(D)).add(right.clone().multiplyScalar(-W)).add(up.clone().multiplyScalar(W))
+            ];
+            
+            const frustumMat = new THREE.LineDashedMaterial({ color: 0x888888, dashSize: 0.1, gapSize: 0.1 });
+            corners.forEach(c => {
+                const geo = new THREE.BufferGeometry().setFromPoints([p0, c]);
+                const line = new THREE.Line(geo, frustumMat);
+                line.computeLineDistances();
+                dynamicGroup.add(line);
+            });
+            
+            // Auto camera follow
+            controls.target.set(frame.p_w[0], frame.p_w[1] + 5, frame.p_w[2]);
+        }
+
+        buildStatic();
+        
+        const slider = document.getElementById('frame-slider');
+        slider.max = Math.max(0, FLIGHT_DATA.frames.length - 1);
+        
+        slider.oninput = function() {
+            buildFrame(this.value);
+        };
+        
+        if (FLIGHT_DATA.frames.length > 0) {
+            buildFrame(0);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
